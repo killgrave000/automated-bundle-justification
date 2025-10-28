@@ -16,7 +16,7 @@ st.session_state.setdefault("download_ready", False)
 # -----------------------------
 # CONFIGURATION
 # -----------------------------
-GEMINI_API_KEY = "AIzaSyAKbtJyypvjhUii916BcqpAHeprwZWW3Dc"  # <-- Replace with your valid key
+GEMINI_API_KEY = "AIzaSyBtRqEW7rsilzB_sNzTuknIkR1bXPkqwQw"  # <-- Replace with your valid key
 import platform
 import shutil
 
@@ -340,7 +340,7 @@ if st.button("🚀 Run"):
                 output_doc = create_docx_with_full_letter(full_letter)
 
                 st.success("✅ Automation complete!")
-                st.subheader("📜 Generated BCBS Justification Letter")
+                st.subheader("📜 Generated BCBS Bundle Justification Letter")
                 st.markdown(f"<div style='white-space: pre-wrap; font-size:16px;'>{full_letter}</div>", unsafe_allow_html=True)
                 st.session_state["download_ready"] = True
 
