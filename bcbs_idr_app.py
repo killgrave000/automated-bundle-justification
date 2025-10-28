@@ -35,7 +35,7 @@ else:
 # STREAMLIT FRONT END SETUP
 # -----------------------------
 st.set_page_config(page_title="BCBS Justification for IDR", layout="centered")
-st.title("🏥 BCBS Justification for IDR Generator")
+st.title("🏥 BCBS Justification for Bundle IDR Generator")
 st.write("Upload EOB PDF, MRN PDF, and Prompt TXT file to generate a formatted BCBS justification document.")
 
 # -----------------------------
