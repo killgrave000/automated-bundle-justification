@@ -88,27 +88,26 @@ def extract_fields(eob_text):
     ]
     date_of_service = find_field(date_patterns, eob_text, "Date")
 
-# ---------------- HCPCS / CPT CODES ----------------
+    # CPT / HCPCS CODES
     lines = eob_text.splitlines()
     ranked_codes = []
 
     for line in lines:
-        # Capture 4–5 digit CPT/HCPCS-like tokens
         code_match = re.search(r"(?:HCPCS|CPT|^|\s)([A-Z0-9]{4,5})(?:\s|$)", line)
         if not code_match:
             continue
 
         code = code_match.group(1)
 
-        # Skip non-CPT identifiers (e.g., transaction IDs)
+        # Skip junk
         if re.search(r"[A-Za-z]{2,}\d{4,}", line):
             continue
 
-        # Keep only CPT/HCPCS codes starting with 9, 7, or 8
-        if not re.match(r"^[978]", code):
+        # Allow CPT codes starting with 9, 8, 7, or 0
+        if not re.match(r"^[9870]", code):
             continue
 
-        # Find billed amount and require > $400
+        # Require billed > $400
         billed_match = re.search(r"\$([\d,]+\.\d{2})", line)
         if billed_match:
             billed_amount = float(billed_match.group(1).replace(",", ""))
@@ -117,14 +116,12 @@ def extract_fields(eob_text):
         else:
             continue
 
-        # Automatically add modifier -25 for E/M or critical care codes
-        # Emergency E/M: 99283–99285, Critical care: 99291–99292
+        # Emergency E/M auto modifier: 99283–99285, 99291–99292
         if re.match(r"^992(8[3-5]|9[1-2])$", code):
             code = f"{code}-25"
 
         if code not in ranked_codes:
             ranked_codes.append(code)
-
 
 
     # ---------------- DRG CODE ----------------
