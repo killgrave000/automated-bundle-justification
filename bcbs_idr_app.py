@@ -78,80 +78,95 @@ def find_field(patterns, text, label):
 
 
 def extract_fields(eob_text):
-    """Extract claim fields robustly from EOB text"""
-    # ---------------- DATE OF SERVICE ----------------
+    """Extract:
+       - emergency 9928x always as -25
+       - all codes starting with 9 always included
+       - codes starting with 7/8/0 included if billed > 400 (local window scan)
+    """
+
+    # -------- DATE --------
     date_patterns = [
-        r"Date.?of.?Service[s]?:?\s*(\d{1,2}/\d{1,2}/\d{2,4})",
-        r"Service Date[s]?:?\s*(\d{1,2}/\d{1,2}/\d{2,4})",
-        r"Service Dates?\s*[-–]\s*(\d{1,2}/\d{1,2}/\d{2,4})",
-        r"Date Range[:\s]+(\d{1,2}/\d{1,2}/\d{2,4})"
+        r"Service Dates?\s*[:\- ]+\s*(\d{1,2}/\d{1,2}/\d{2,4})",
+        r"Date of Service[s]?\s*[:\- ]+\s*(\d{1,2}/\d{1,2}/\d{2,4})"
     ]
     date_of_service = find_field(date_patterns, eob_text, "Date")
 
-    # CPT / HCPCS CODES
     lines = eob_text.splitlines()
-    ranked_codes = []
+    n = len(lines)
+    filtered = []
 
-    for line in lines:
-        code_match = re.search(r"(?:HCPCS|CPT|^|\s)([A-Z0-9]{4,5})(?:\s|$)", line)
+    # -------- helper: find billed near code --------
+    def max_billed_around(idx, radius=4):
+        start = max(0, idx - radius)
+        end = min(n, idx + radius + 1)
+        max_amt = 0.0
+        for j in range(start, end):
+            for m in re.finditer(r"\$([0-9,]+\.\d{2})", lines[j]):
+                amt = float(m.group(1).replace(",", ""))
+                if amt > max_amt:
+                    max_amt = amt
+        return max_amt
+
+    # -------- CPT extraction --------
+    for i, line in enumerate(lines):
+        code_match = re.search(r"\b([A-Z]?\d{4,5})\b", line)
         if not code_match:
             continue
 
         code = code_match.group(1)
+        first = code[0]
 
-        # Skip junk
-        if re.search(r"[A-Za-z]{2,}\d{4,}", line):
+        # Only use 9,7,8,0 codes
+        if first not in ("9", "7", "8", "0"):
             continue
 
-        # Allow CPT codes starting with 9, 8, 7, or 0
-        if not re.match(r"^[9870]", code):
+        # Emergency → ALWAYS add -25
+        if code.startswith("9928"):
+            out_code = f"{code}-25"
+            if out_code not in filtered:
+                filtered.append(out_code)
             continue
 
-        # Require billed > $400
-        billed_match = re.search(r"\$([\d,]+\.\d{2})", line)
-        if billed_match:
-            billed_amount = float(billed_match.group(1).replace(",", ""))
-            if billed_amount <= 400:
-                continue
-        else:
+        # All 9xxxx → always include
+        if first == "9":
+            if code not in filtered:
+                filtered.append(code)
             continue
 
-        # Emergency E/M auto modifier: 99283–99285, 99291–99292
-        if re.match(r"^992(8[3-5]|9[1-2])$", code):
-            code = f"{code}-25"
+        # 7xxxx / 8xxxx / 0xxxx → only if billed > 400
+        max_local_billed = max_billed_around(i, radius=4)
+        if max_local_billed > 400:
+            if code not in filtered:
+                filtered.append(code)
+            continue
 
-        if code not in ranked_codes:
-            ranked_codes.append(code)
-
-
-    # ---------------- DRG CODE ----------------
+    # -------- DRG extraction --------
     drg_patterns = [
-        r"DRG\s*[:#-]?\s*([0-9]{2,4})",
-        r"DRG\s*Code\s*[:#-]?\s*([0-9]{2,4})",
-        r"Diagnosis\s*Related\s*Group[^0-9]*([0-9]{2,4})",
-        r"MS[-\s]*DRG[^0-9]*([0-9]{2,4})",
-        r"DRG[^0-9]*([0-9]{2,4})",
-        r"RelatedGroup[^0-9]*([0-9]{2,4})"
+        r"DRG\s*[:#\-]?\s*([0-9]{2,4})",
+        r"DRG Code\s*[:#\-]?\s*([0-9]{2,4})"
     ]
     drg_code = find_field(drg_patterns, eob_text, "DRG Code")
 
-    # ---------------- BILLING PROVIDER ----------------
+    # -------- BILLING PROVIDER --------
     billing_patterns = [
-        r"Bilider(ling Prov?: Name)?:\s*([A-Za-z0-9\s.,&'\-]+)",
-        r"Billing Provider\s+([A-Za-z0-9\s.,&'\-]+)",
-        r"Provider Name\s*[:\-]?\s*([A-Za-z0-9\s.,&'\-]+)"
+        r"Billing Provider Name\s*([\s\S]{0,200})Billing Provider NPI"
     ]
-    billing_provider = find_field(billing_patterns, eob_text, "Billing Provider")
+    m = re.search(billing_patterns[0], eob_text, re.IGNORECASE)
+    if m:
+        billing_provider = " ".join(m.group(1).split())
+    else:
+        billing_provider = "Billing Provider not found"
 
-    # Remove trailing noise
     billing_provider = re.sub(
-        r"\s*(NPI.*|Other Carrier.*|Rendering Provider.*|Check Date.*|Address.*|City.*|State.*|Zip.*)$",
+        r"\s*(NPI.*|Rendering.*|Check Date.*|Address.*|City.*|State.*|Zip.*)$",
         "",
         billing_provider,
         flags=re.IGNORECASE,
     ).strip()
 
-    return date_of_service, ranked_codes, drg_code, billing_provider
+    return date_of_service, filtered, drg_code, billing_provider
+
+
 
 
 def generate_mrn_summary(prompt_text, mrn_text):
@@ -191,7 +206,7 @@ These omissions contradict the purpose of the NSA’s transparency goals and mat
 This approach also disproportionately harms out-of-network emergency providers, especially those serving underserved populations and operating independently of hospital systems. It reinforces the need for a fair, case-specific evaluation of the actual services rendered, which far exceeds the clinical complexity of what BCBS’s bundled rate represents.
 
 ###  Improper DRG Classification and Non-Compliant Adjudication of Outpatient Emergency Claim
-The claim was submitted using CPT/HCPCS codes—**{hcpcs_list}**—each reflecting distinct, medically necessary procedures performed during the emergency department encounter. Modifier 25 was correctly appended to CPT **{emergency_code_text}**, denoting a significant, separately identifiable evaluation and management (E/M) service delivered in addition to diagnostic testing, as recognized by CMS's National Correct Coding Initiative (NCCI) policy.
+A thorough assessment of the Explanation of Benefits (EOB) provided by Blue Cross Blue Shield (BCBS) reveals major systemic errors in claim adjudication and misclassification. The claim was submitted using CPT/HCPCS codes—**{hcpcs_list}**—each reflecting distinct, medically necessary procedures performed during the emergency department encounter. Modifier 25 was correctly appended to CPT **{emergency_code_text}**, denoting a significant, separately identifiable evaluation and management (E/M) service delivered in addition to diagnostic testing, as recognized by CMS's National Correct Coding Initiative (NCCI) policy.
 Nevertheless, the BCBS EOB lists a “Hospital Payment Indicator: R – Case Rate” and assigns Diagnosis Related Group (DRG) **{drg}** with a zero DRG weight (0.00000), indicating the payer’s system improperly converted an outpatient freestanding emergency department (FSED) claim into an inpatient, DRG-based payment methodology. This reclassification is both factually incorrect and in violation of federal billing and adjudication requirements. DRG payment models are explicitly reserved for inpatient hospital stays and are not permitted as a basis for adjudicating outpatient emergency claims billed under CPT/HCPCS coding protocols.
 Applying DRG automation to an FSED claim misrepresents the nature of the service, the facility type, and the context of care delivery, resulting in an unsupported case-rate payment that fails to consider the submitted codes and the true scope of services rendered. This process does not satisfy the legal requirements of 45 C.F.R. § 149.510(c)(4)(iii), which obligate payers to evaluate payment based on the provider’s experience, facility type, service scope, and patient acuity.
 For these reasons, it is imperative that the adjudication and Independent Dispute Resolution (IDR) review privilege only the original CPT/HCPCS codes submitted, accurately representing the outpatient emergency care delivered. Reimbursement must be recalculated according to NSA regulations to guarantee precise, transparent, and equitable payment in line with the intent of the No Surprises Act.
