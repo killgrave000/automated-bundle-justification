@@ -109,6 +109,11 @@ def extract_fields(eob_text):
 
     # -------- CPT extraction --------
     for i, line in enumerate(lines):
+
+        # NEW FIX: ignore lines containing mixed alphanumeric identifiers (UUIDs)
+        if re.search(r"[A-Za-z]+[0-9]+[A-Za-z0-9]*", line):
+            continue
+
         code_match = re.search(r"\b([A-Z]?\d{4,5})\b", line)
         if not code_match:
             continue
@@ -165,6 +170,7 @@ def extract_fields(eob_text):
     ).strip()
 
     return date_of_service, filtered, drg_code, billing_provider
+
 
 
 
