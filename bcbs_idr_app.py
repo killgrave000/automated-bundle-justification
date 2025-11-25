@@ -16,7 +16,7 @@ st.session_state.setdefault("download_ready", False)
 # -----------------------------
 # CONFIGURATION
 # -----------------------------
-GEMINI_API_KEY = "AIzaSyBtRqEW7rsilzB_sNzTuknIkR1bXPkqwQw"  # <-- Replace with your valid key
+GEMINI_API_KEY = "AIzaSyAVVWiNZUOgdswHzyuU8byRMvEKeZ5vJj4"  # <-- Replace with your valid key
 import platform
 import shutil
 
