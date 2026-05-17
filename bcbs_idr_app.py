@@ -80,8 +80,8 @@ def find_field(patterns, text, label):
 def extract_fields(eob_text):
     """Extract:
        - emergency 9928x always as -25
-       - all codes starting with 9 always included
-       - codes starting with 7/8/0 included if billed > 400 (local window scan)
+       - all codes starting with 9, 7, 2, 1, or 0 always included
+       - codes starting with 8 included if billed > 400 (local window scan)
     """
 
     # -------- DATE --------
@@ -95,34 +95,44 @@ def extract_fields(eob_text):
     n = len(lines)
     filtered = []
 
-    # -------- helper: find billed near code --------
-    def max_billed_around(idx, radius=4):
+    # -------- helper: find billed amount for the current code block --------
+    def billed_for_code(idx, radius=8):
         start = max(0, idx - radius)
-        end = min(n, idx + radius + 1)
-        max_amt = 0.0
-        for j in range(start, end):
-            for m in re.finditer(r"\$([0-9,]+\.\d{2})", lines[j]):
-                amt = float(m.group(1).replace(",", ""))
-                if amt > max_amt:
-                    max_amt = amt
-        return max_amt
+        for j in range(idx, start - 1, -1):
+            line = lines[j]
+            if re.search(r"Codes|Reason/Remark|Coinsurance|Copay|Deductible|Discount|Ineligible", line, re.IGNORECASE):
+                continue
+
+            amounts = re.findall(r"\$([0-9,]+\.\d{2})", line)
+            if len(amounts) >= 2:
+                return float(amounts[1].replace(",", ""))
+            if len(amounts) == 1:
+                return float(amounts[0].replace(",", ""))
+
+        return 0.0
 
     # -------- CPT extraction --------
+    cpt_pattern = re.compile(r"(?<![A-Za-z0-9/])([A-Z]\d{4}|\d{4,5}[A-Z]?)(?![A-Za-z0-9/])")
+    uuid_pattern = re.compile(
+        r"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b"
+    )
     for i, line in enumerate(lines):
 
-        # NEW FIX: ignore lines containing mixed alphanumeric identifiers (UUIDs)
-        if re.search(r"[A-Za-z]+[0-9]+[A-Za-z0-9]*", line):
+        # Ignore UUIDs without dropping valid alphanumeric CPT/HCPCS codes like 0563U.
+        line_for_codes = uuid_pattern.sub(" ", line)
+        code_context = " ".join(lines[max(0, i - 2): i + 1])
+        if not re.search(r"\b(CPT|HCPCS)\b", code_context, re.IGNORECASE):
             continue
 
-        code_match = re.search(r"\b([A-Z]?\d{4,5})\b", line)
+        code_match = cpt_pattern.search(line_for_codes)
         if not code_match:
             continue
 
         code = code_match.group(1)
         first = code[0]
 
-        # Only use 9,7,8,0 codes
-        if first not in ("9", "7", "8", "0"):
+        # Only use 9, 7, 2, 1, 0, and qualifying 8 codes.
+        if first not in ("9", "8", "7", "2", "1", "0"):
             continue
 
         # Emergency → ALWAYS add -25
@@ -132,15 +142,15 @@ def extract_fields(eob_text):
                 filtered.append(out_code)
             continue
 
-        # All 9xxxx → always include
-        if first == "9":
+        # All 9xxxx / 7xxxx / 2xxxx / 1xxxx / 0xxxx codes are always included.
+        if first in ("9", "7", "2", "1", "0"):
             if code not in filtered:
                 filtered.append(code)
             continue
 
-        # 7xxxx / 8xxxx / 0xxxx → only if billed > 400
-        max_local_billed = max_billed_around(i, radius=4)
-        if max_local_billed > 400:
+        # 8xxxx codes are included only if billed > 400.
+        billed_amount = billed_for_code(i)
+        if billed_amount > 400:
             if code not in filtered:
                 filtered.append(code)
             continue
@@ -189,7 +199,7 @@ def generate_mrn_summary(prompt_text, mrn_text):
 
 def generate_bcbs_justification_letter(date, hcpcs, drg, billing_provider, mrn_summary):
     """Build the complete letter text with variables inserted."""
-    hcpcs_list = ','.join(hcpcs) if hcpcs else 'N/A'
+    hcpcs_list = ', '.join(hcpcs) if hcpcs else 'N/A'
     emergency_codes = []
     for c in hcpcs:
         base_code = re.sub(r"-.*", "", c)
