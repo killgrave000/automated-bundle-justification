@@ -10,8 +10,65 @@ from PIL import Image
 from docx.shared import Pt, Inches
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 from docx.oxml.ns import qn
+from reportlab.lib.pagesizes import LETTER
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from xml.sax.saxutils import escape
 
 st.session_state.setdefault("download_ready", False)
+st.session_state.setdefault("original_letter", "")
+st.session_state.setdefault("saved_letter", "")
+st.session_state.setdefault("letter_editor", "")
+st.session_state.setdefault("ticket_name", "")
+
+DEFAULT_TARGET_CPT_CODES = ""
+GEMINI_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-3.5-flash",
+]
+
+
+def build_mrn_summary_prompt(target_cpt_codes_text):
+    return f"""
+Based on the uploaded medical record, please generate a formal "Clinical Summary and CPT Code Justification" for medical billing purposes.
+
+The output must follow the exact structure and professional tone below. Focus on medical necessity, severity of illness, and the complexity of medical decision-making (MDM).
+
+Structure the response as follows:
+
+**I. Clinical Summary and Severity of Illness**
+* Start with the patient demographics (age/sex), relevant history, and mode of arrival(don't mention patient name).
+* State the Acuity Level and describe the patient's condition upon arrival (symptoms, pain scores, duration).
+* Corroborate severity with objective data: Vital signs (highlight abnormalities like tachycardia, hypertension, hypoxia, etc.), Physical Exam findings, and key Lab/Imaging results (cite specific values).
+* do not mention Low complexity,Stable,Negative imaging,Acuity Less Urgent.
+
+**II. Impact of Treatment and Medical Necessity**
+* Explain why the treatments (IV fluids, meds, imaging) were medically necessary to prevent deterioration or rule out life-threatening conditions.
+* Describe the specific interventions (e.g., "1000 mL Normal Saline," specific meds) and their direct impact on the patient (e.g., "reduced pain score from X to Y," "stabilized vitals").
+
+**III. CPT Code Justification**
+Target Codes to Justify:
+[{target_cpt_codes_text}]
+
+Requirements:
+- Structure: Provide distinct bullet points for the justifications.
+- Content: Explain the medical necessity and impact of the treatment/workup (e.g., high complexity MDM, specific procedure necessity, interpretation of complex tests).
+- Formatting: Do NOT specify or list the CPT code numbers in the text. Provide an overall justification description for the services represented by these codes.
+- Evidence Base: Strictly use evidence found in the chart (do not hallucinate interventions).
+
+**IV. Conclusion**
+* Conclude with a single, high-impact paragraph starting with exactly this phrase: "The medical record clearly demonstrates that this encounter was not a routine evaluation of [Chief Complaint]."
+* Then, complete the sentence by listing the convergence of primary clinical markers (e.g., Acute Renal Injury, Pancolitis) and patient risk factors (e.g., immunocompromised state) that necessitated the intensive resource utilization and the billed CPT codes.
+
+**Instructions:**
+* Use professional, billing-focused language (e.g., "profound physiological instability," "corroborated by," "substantiated by").
+* Be specific with data points from the file (e.g., Creatinine 1.4 mg/dL, WBC 15.1, etc.).
+* Format exactly like the example provided in your training data.
+make it within 500 words
+""".strip()
 
 # -----------------------------
 # CONFIGURATION
@@ -36,14 +93,24 @@ else:
 # -----------------------------
 st.set_page_config(page_title="BCBS Justification for IDR", layout="centered")
 st.title("🏥 BCBS Justification for Bundle IDR Generator")
-st.write("Upload EOB PDF, MRN PDF, and Prompt TXT file to generate a formatted BCBS justification document.")
+st.write("Upload EOB PDF and MRN PDF to generate a formatted BCBS justification document.")
+target_cpt_codes_text = st.text_input(
+    "Target CPT Codes",
+    value=DEFAULT_TARGET_CPT_CODES,
+    help="Enter the CPT/HCPCS codes to justify, separated by commas.",
+)
+selected_gemini_model = st.selectbox(
+    "Gemini Model",
+    options=GEMINI_MODELS,
+    index=0,
+    help="Choose which Gemini model will generate the MRN summary.",
+)
 
 # -----------------------------
 # FILE UPLOADS
 # -----------------------------
 eob_file = st.file_uploader("📄 Upload EOB PDF", type=["pdf"])
 mrn_file = st.file_uploader("🧾 Upload MRN PDF", type=["pdf"])
-prompt_file = st.file_uploader("📝 Upload MRN Summary Prompt (TXT)", type=["txt"])
 
 # -----------------------------
 # HELPER FUNCTIONS
@@ -75,6 +142,13 @@ def find_field(patterns, text, label):
         if match:
             return match.group(1).strip()
     return f"{label} not found"
+
+
+def get_ticket_name_from_filename(filename):
+    """Use the first filename segment as the ticket name."""
+    base_name = filename.rsplit(".", 1)[0].strip()
+    ticket_name = base_name.split()[0] if base_name else "BCBS"
+    return re.sub(r'[<>:"/\\|?*]+', "", ticket_name) or "BCBS"
 
 
 def extract_fields(eob_text):
@@ -185,10 +259,10 @@ def extract_fields(eob_text):
 
 
 
-def generate_mrn_summary(prompt_text, mrn_text):
+def generate_mrn_summary(prompt_text, mrn_text, model_name):
     """Generate structured MRN summary using Gemini"""
     genai.configure(api_key=GEMINI_API_KEY.strip()) 
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    model = genai.GenerativeModel(model_name)
     combined_prompt = (
         f"{prompt_text}\n\n---\n\n{mrn_text}\n\n"
         "Format output using **bold** headings and line breaks for clarity."
@@ -349,39 +423,131 @@ def create_docx_with_full_letter(full_letter):
     return output
 
 
+def markdown_bold_to_pdf_markup(text):
+    """Convert simple **bold** markers to ReportLab paragraph markup."""
+    safe_text = escape(text).replace("\n", "<br/>")
+    return re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", safe_text)
+
+
+def create_pdf_with_full_letter(full_letter):
+    """Generate final PDF from the saved letter text."""
+    output = BytesIO()
+    doc = SimpleDocTemplate(
+        output,
+        pagesize=LETTER,
+        rightMargin=inch,
+        leftMargin=inch,
+        topMargin=inch,
+        bottomMargin=inch,
+    )
+    styles = getSampleStyleSheet()
+    normal_style = ParagraphStyle(
+        "LetterBody",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=10.5,
+        leading=14,
+        spaceAfter=8,
+    )
+    heading_style = ParagraphStyle(
+        "LetterHeading",
+        parent=normal_style,
+        fontName="Helvetica-Bold",
+        fontSize=12,
+        leading=15,
+        spaceBefore=10,
+        spaceAfter=6,
+    )
+    bullet_style = ParagraphStyle(
+        "LetterBullet",
+        parent=normal_style,
+        leftIndent=18,
+        firstLineIndent=-9,
+    )
+
+    story = []
+    for line in full_letter.splitlines():
+        s = line.strip()
+        if not s:
+            story.append(Spacer(1, 8))
+            continue
+
+        if s.startswith("### "):
+            story.append(Paragraph(markdown_bold_to_pdf_markup(s.replace("### ", "")), heading_style))
+        elif s.startswith("* ") or s.startswith("•"):
+            clean_text = s.replace("•", "", 1).replace("* ", "", 1).strip()
+            story.append(Paragraph(f"&bull; {markdown_bold_to_pdf_markup(clean_text)}", bullet_style))
+        else:
+            story.append(Paragraph(markdown_bold_to_pdf_markup(s), normal_style))
+
+    doc.build(story)
+    output.seek(0)
+    return output
+
+
+def save_edited_letter():
+    st.session_state["saved_letter"] = st.session_state.get("letter_editor", "")
+    st.session_state["download_ready"] = True
+
+
+def reset_edited_letter():
+    st.session_state["letter_editor"] = st.session_state.get("original_letter", "")
+    st.session_state["saved_letter"] = st.session_state.get("original_letter", "")
+    st.session_state["download_ready"] = bool(st.session_state["saved_letter"])
+
+
 # -----------------------------
 # MAIN WORKFLOW
 # -----------------------------
 if st.button("🚀 Run"):
-    if not (eob_file and mrn_file and prompt_file):
-        st.error("Please upload all required files.")
+    if not (eob_file and mrn_file and target_cpt_codes_text.strip()):
+        st.error("Please upload the EOB PDF, MRN PDF, and enter target CPT codes.")
     else:
-        with st.spinner("Processing... Please wait..."):
+        st.info(f"Running model: {selected_gemini_model}")
+        with st.spinner(f"Processing with {selected_gemini_model}... Please wait..."):
             try:
                 eob_text = extract_text_from_pdf(eob_file)
                 mrn_text = extract_text_from_pdf(mrn_file)
-                prompt_text = prompt_file.read().decode("utf-8")
+                prompt_text = build_mrn_summary_prompt(target_cpt_codes_text.strip())
 
                 date_of_service, hcpcs_codes, drg_code, billing_provider = extract_fields(eob_text)
-                mrn_summary = generate_mrn_summary(prompt_text, mrn_text)
+                mrn_summary = generate_mrn_summary(prompt_text, mrn_text, selected_gemini_model)
                 full_letter = generate_bcbs_justification_letter(date_of_service, hcpcs_codes, drg_code, billing_provider, mrn_summary)
 
-                output_doc = create_docx_with_full_letter(full_letter)
-
                 st.success("✅ Automation complete!")
-                st.subheader("📜 Generated BCBS Bundle Justification Letter")
-                st.markdown(f"<div style='white-space: pre-wrap; font-size:16px;'>{full_letter}</div>", unsafe_allow_html=True)
+                st.session_state["original_letter"] = full_letter
+                st.session_state["saved_letter"] = full_letter
+                st.session_state["letter_editor"] = full_letter
+                st.session_state["ticket_name"] = get_ticket_name_from_filename(eob_file.name)
                 st.session_state["download_ready"] = True
-
-                st.download_button(
-                    label="📥 Download as Word Document (.docx)",
-                    data=output_doc,
-                    file_name="BCBS Justification FOR Bundle IDR with DRG.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True,
-                    key="download_docx_button",
-                    help="Download the generated Word document (remains available after click).",
-                )
 
             except Exception as e:
                 st.error(f"❌ Error occurred: {str(e)}")
+
+if st.session_state["original_letter"]:
+    st.subheader("📜 Generated BCBS Bundle Justification Letter")
+    st.text_area(
+        "Edit Output",
+        height=600,
+        key="letter_editor",
+        help="Edit the generated letter here, then click Save Edits before downloading.",
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("Save Edits", on_click=save_edited_letter, use_container_width=True)
+    with col2:
+        st.button("Reset to Generated Output", on_click=reset_edited_letter, use_container_width=True)
+
+    if st.session_state["saved_letter"]:
+        output_pdf = create_pdf_with_full_letter(st.session_state["saved_letter"])
+        ticket_name = st.session_state.get("ticket_name", "BCBS")
+        st.download_button(
+            label="📥 Download as PDF",
+            data=output_pdf,
+            file_name=f"{ticket_name} BCBS Justification FOR Bundle IDR with DRG.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            key="download_docx_button",
+            help="Download the saved PDF document.",
+        )
