@@ -70,6 +70,33 @@ Requirements:
 make it within 500 words
 """.strip()
 
+
+def normalize_target_cpt_codes(codes_text):
+    """Accept codes separated by spaces, commas, or line breaks."""
+    codes = re.split(r"[\s,;]+", codes_text.strip())
+    return ", ".join(code for code in codes if code)
+
+
+def build_hcpcs_codes_from_target(codes_text):
+    """Use frontend target codes as the CPT/HCPCS list for the letter."""
+    hcpcs_codes = []
+    for code in re.split(r"[\s,;]+", codes_text.strip()):
+        if not code:
+            continue
+
+        base_code = re.sub(r"-.*", "", code.strip())
+
+        # Emergency → ALWAYS add -25
+        if base_code.startswith("9928"):
+            output_code = f"{base_code}-25"
+        else:
+            output_code = code.strip()
+
+        if output_code not in hcpcs_codes:
+            hcpcs_codes.append(output_code)
+
+    return hcpcs_codes
+
 # -----------------------------
 # CONFIGURATION
 # -----------------------------
@@ -97,7 +124,7 @@ st.write("Upload EOB PDF and MRN PDF to generate a formatted BCBS justification 
 target_cpt_codes_text = st.text_input(
     "Target CPT Codes",
     value=DEFAULT_TARGET_CPT_CODES,
-    help="Enter the CPT/HCPCS codes to justify, separated by commas.",
+    help="Enter CPT/HCPCS codes separated by spaces, commas, or line breaks.",
 )
 selected_gemini_model = st.selectbox(
     "Gemini Model",
@@ -500,7 +527,8 @@ def reset_edited_letter():
 # MAIN WORKFLOW
 # -----------------------------
 if st.button("🚀 Run"):
-    if not (eob_file and mrn_file and target_cpt_codes_text.strip()):
+    normalized_target_cpt_codes = normalize_target_cpt_codes(target_cpt_codes_text)
+    if not (eob_file and mrn_file and normalized_target_cpt_codes):
         st.error("Please upload the EOB PDF, MRN PDF, and enter target CPT codes.")
     else:
         st.info(f"Running model: {selected_gemini_model}")
@@ -508,9 +536,10 @@ if st.button("🚀 Run"):
             try:
                 eob_text = extract_text_from_pdf(eob_file)
                 mrn_text = extract_text_from_pdf(mrn_file)
-                prompt_text = build_mrn_summary_prompt(target_cpt_codes_text.strip())
+                prompt_text = build_mrn_summary_prompt(normalized_target_cpt_codes)
 
-                date_of_service, hcpcs_codes, drg_code, billing_provider = extract_fields(eob_text)
+                date_of_service, _extracted_hcpcs_codes, drg_code, billing_provider = extract_fields(eob_text)
+                hcpcs_codes = build_hcpcs_codes_from_target(normalized_target_cpt_codes)
                 mrn_summary = generate_mrn_summary(prompt_text, mrn_text, selected_gemini_model)
                 full_letter = generate_bcbs_justification_letter(date_of_service, hcpcs_codes, drg_code, billing_provider, mrn_summary)
 
