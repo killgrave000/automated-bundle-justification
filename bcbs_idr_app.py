@@ -21,6 +21,7 @@ st.session_state.setdefault("original_letter", "")
 st.session_state.setdefault("saved_letter", "")
 st.session_state.setdefault("letter_editor", "")
 st.session_state.setdefault("ticket_name", "")
+st.session_state.setdefault("used_gemini_model", "")
 
 DEFAULT_TARGET_CPT_CODES = ""
 GEMINI_MODELS = [
@@ -125,12 +126,6 @@ target_cpt_codes_text = st.text_input(
     "Target CPT Codes",
     value=DEFAULT_TARGET_CPT_CODES,
     help="Enter CPT/HCPCS codes separated by spaces, commas, or line breaks.",
-)
-selected_gemini_model = st.selectbox(
-    "Gemini Model",
-    options=GEMINI_MODELS,
-    index=0,
-    help="Choose which Gemini model will generate the MRN summary.",
 )
 
 # -----------------------------
@@ -296,6 +291,21 @@ def generate_mrn_summary(prompt_text, mrn_text, model_name):
     )
     response = model.generate_content(combined_prompt)
     return response.text.strip()
+
+
+def generate_mrn_summary_with_fallback(prompt_text, mrn_text):
+    """Try Gemini models in order and return the first successful response."""
+    errors = []
+    for model_name in GEMINI_MODELS:
+        try:
+            summary = generate_mrn_summary(prompt_text, mrn_text, model_name)
+            if summary:
+                return summary, model_name
+            errors.append(f"{model_name}: empty response")
+        except Exception as e:
+            errors.append(f"{model_name}: {e}")
+
+    raise RuntimeError("All Gemini models failed. " + " | ".join(errors))
 
 
 def generate_bcbs_justification_letter(date, hcpcs, drg, billing_provider, mrn_summary):
@@ -531,8 +541,7 @@ if st.button("🚀 Run"):
     if not (eob_file and mrn_file and normalized_target_cpt_codes):
         st.error("Please upload the EOB PDF, MRN PDF, and enter target CPT codes.")
     else:
-        st.info(f"Running model: {selected_gemini_model}")
-        with st.spinner(f"Processing with {selected_gemini_model}... Please wait..."):
+        with st.spinner("Processing with Gemini... Please wait..."):
             try:
                 eob_text = extract_text_from_pdf(eob_file)
                 mrn_text = extract_text_from_pdf(mrn_file)
@@ -540,10 +549,11 @@ if st.button("🚀 Run"):
 
                 date_of_service, _extracted_hcpcs_codes, drg_code, billing_provider = extract_fields(eob_text)
                 hcpcs_codes = build_hcpcs_codes_from_target(normalized_target_cpt_codes)
-                mrn_summary = generate_mrn_summary(prompt_text, mrn_text, selected_gemini_model)
+                mrn_summary, used_gemini_model = generate_mrn_summary_with_fallback(prompt_text, mrn_text)
                 full_letter = generate_bcbs_justification_letter(date_of_service, hcpcs_codes, drg_code, billing_provider, mrn_summary)
 
                 st.success("✅ Automation complete!")
+                st.session_state["used_gemini_model"] = used_gemini_model
                 st.session_state["original_letter"] = full_letter
                 st.session_state["saved_letter"] = full_letter
                 st.session_state["letter_editor"] = full_letter
@@ -555,6 +565,8 @@ if st.button("🚀 Run"):
 
 if st.session_state["original_letter"]:
     st.subheader("📜 Generated BCBS Bundle Justification Letter")
+    if st.session_state["used_gemini_model"]:
+        st.info(f"Model used: {st.session_state['used_gemini_model']}")
     st.text_area(
         "Edit Output",
         height=600,
