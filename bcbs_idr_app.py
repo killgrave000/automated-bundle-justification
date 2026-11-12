@@ -586,7 +586,7 @@ if st.session_state["original_letter"]:
         st.download_button(
             label="📥 Download as PDF",
             data=output_pdf,
-            file_name=f"{ticket_name} BCBS Justification FOR Bundle IDR with DRG.pdf",
+            file_name=f"{ticket_name} Justification FOR Bundle IDR with DRG.pdf",
             mime="application/pdf",
             use_container_width=True,
             key="download_docx_button",
